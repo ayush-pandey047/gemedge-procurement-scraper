@@ -1,70 +1,69 @@
 
 import logging
-import pandas as pd
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
 
-def flag_winner_not_lowest(df: pd.DataFrame) -> pd.DataFrame:
+def _safe_float(val) -> float:
+    try:
+        return float(val) if val else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def flag_anomalies(rows: list[dict]) -> list[dict]:
     """
-    For each bid_id, find the minimum vendor_price.
-    If winner_price > min_vendor_price (by more than 0.5%), flag it.
-
-    WHY 0.5% tolerance? Floating point and rounding in GEM data can cause
-    tiny differences. We only flag meaningful discrepancies.
+    Add a 'status_flag' field to each row with comma-separated anomaly codes.
+    Operates on the full dataset for repeat-winner detection.
     """
-    if "winner_price" not in df.columns or "vendor_price" not in df.columns:
-        return df
 
-    min_prices = (
-        df.groupby("bid_id")["vendor_price"]
-          .min()
-          .rename("min_vendor_price")
+    for row in rows:
+        flags = []
+
+        winner_price = _safe_float(row.get("winner_price"))
+        vendor_price = _safe_float(row.get("vendor_price"))
+        num_bidders = int(row.get("num_bidders") or 0)
+        vendor_rank = (row.get("vendor_rank") or "").upper()
+
+
+        if winner_price == 0:
+            flags.append("zero_price")
+
+
+        if num_bidders == 1:
+            flags.append("single_bidder")
+
+     
+        if vendor_rank == "L2" and vendor_price and winner_price:
+            if vendor_price < winner_price:
+                flags.append("winner_not_lowest")
+
+
+        if vendor_rank == "L2" and vendor_price and winner_price and winner_price > 0:
+            gap_pct = (vendor_price - winner_price) / winner_price * 100
+            if gap_pct >= 50:
+                flags.append("suspicious_gap")
+
+        row["status_flag"] = ",".join(flags) if flags else "ok"
+
+
+    winner_counts = Counter(
+        row.get("winner_name", "").strip()
+        for row in rows
+        if row.get("winner_name", "").strip()
     )
-    df = df.merge(min_prices, on="bid_id", how="left")
+    repeat_winners = {name for name, count in winner_counts.items() if count > 1}
 
-    df["winner_not_lowest"] = (
-        (df["winner_price"].notna()) &
-        (df["min_vendor_price"].notna()) &
-        (df["winner_price"] > df["min_vendor_price"] * 1.005)
-    )
+    for row in rows:
+        winner = row.get("winner_name", "").strip()
+        if winner in repeat_winners:
+            existing = row.get("status_flag", "ok")
+            if "repeat_winner" not in existing:
+                row["status_flag"] = (
+                    existing + ",repeat_winner" if existing != "ok" else "repeat_winner"
+                )
 
-    anomaly_count = df.drop_duplicates("bid_id")["winner_not_lowest"].sum()
-    logger.info(f"Anomaly: {anomaly_count} bids where winner was NOT the lowest price.")
-
-   
-    df.loc[df["winner_not_lowest"], "status_flag"] = "ANOMALY_WINNER_NOT_LOWEST"
-
-    return df
-
-
-def flag_large_l1_l2_gap(df: pd.DataFrame, threshold_pct: float = 20.0) -> pd.DataFrame:
-    """
-    For each bid, compute gap between L1 and L2 price as a %.
-    Flag bids where the gap exceeds threshold_pct%.
-
-    A very large L1-L2 gap can indicate:
-      - A single dominant vendor (monopolistic)
-      - Possible bid manipulation
-    """
-    if "vendor_rank" not in df.columns or "vendor_price" not in df.columns:
-        return df
-
-    l1 = df[df["vendor_rank"] == "L1"][["bid_id", "vendor_price"]].rename(
-        columns={"vendor_price": "l1_price"}
-    )
-    l2 = df[df["vendor_rank"] == "L2"][["bid_id", "vendor_price"]].rename(
-        columns={"vendor_price": "l2_price"}
-    )
-
-    gaps = pd.merge(l1, l2, on="bid_id", how="inner")
-    gaps["l1_l2_gap_pct"] = ( (gaps["l2_price"] - gaps["l1_price"]) / gaps["l1_price"] * 100).round(2)
-    gaps["large_l1_l2_gap"] = gaps["l1_l2_gap_pct"] > threshold_pct
-
-    df = df.merge(gaps[["bid_id", "l1_l2_gap_pct", "large_l1_l2_gap"]],  on="bid_id", how="left")
-
-    large_gap_count = gaps["large_l1_l2_gap"].sum()
-    logger.info(
-        f"Anomaly: {large_gap_count} bids with L1-L2 price gap > {threshold_pct}%."
-    )
-    return df
+    flagged = sum(1 for r in rows if r.get("status_flag", "ok") != "ok")
+    logger.info("Anomaly detection complete: %d/%d rows flagged", flagged, len(rows))
+    return rows
