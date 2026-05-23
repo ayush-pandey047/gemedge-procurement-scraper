@@ -1,50 +1,79 @@
+
 import logging
-import pandas as pd
+from fuzzywuzzy import fuzz
+
+from processor.cleaner import canonical_vendor_name
 
 logger = logging.getLogger(__name__)
 
+FUZZY_THRESHOLD = 85  
 
-def deduplicate_bids(df: pd.DataFrame) -> pd.DataFrame:
+
+def deduplicate_bids(rows: list[dict]) -> list[dict]:
+    """Remove duplicate bid_id rows, keeping the most complete record."""
+    seen: dict[str, dict] = {}
+    for row in rows:
+        bid_id = row.get("bid_id", "")
+        if not bid_id:
+            continue
+        if bid_id not in seen:
+            seen[bid_id] = row
+        else:
+           
+            existing = seen[bid_id]
+            if sum(bool(v) for v in row.values()) > sum(bool(v) for v in existing.values()):
+                seen[bid_id] = row
+
+    deduped = list(seen.values())
+    logger.info("Dedup bids: %d → %d", len(rows), len(deduped))
+    return deduped
+
+
+def cluster_vendor_names(names: list[str]) -> dict[str, str]:
     """
-    Remove rows with duplicate bid_id + vendor_name combinations.
-
-    We keep the FIRST occurrence (sorted by any available date or original order).
-    Duplicate rows are logged for transparency.
+    Build a mapping from variant names → canonical name.
+    Uses fuzzy matching within sorted name groups.
     """
-    before = len(df)
+    canonical_keys = [canonical_vendor_name(n) for n in names]
+    clusters: dict[str, str] = {}  
 
-   
-    subset = ["bid_id", "vendor_name"]
-    subset = [c for c in subset if c in df.columns]  
+    for i, key_i in enumerate(canonical_keys):
+        if not key_i:
+            continue
+        matched = False
+        for existing_key in list(clusters.keys()):
+            score = fuzz.token_sort_ratio(key_i, existing_key)
+            if score >= FUZZY_THRESHOLD:
+                clusters[key_i] = clusters[existing_key]
+                matched = True
+                break
+        if not matched:
+            clusters[key_i] = names[i]
 
-    df = df.drop_duplicates(subset=subset, keep="first")
-    after = len(df)
 
-    logger.info(f"Deduplication: removed {before - after} duplicate rows. "
-                f"{after} rows remain.")
-    return df
+    name_map: dict[str, str] = {}
+    for i, name in enumerate(names):
+        key = canonical_keys[i]
+        name_map[name] = clusters.get(key, name)
+
+    return name_map
 
 
-def flag_duplicate_vendors(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add a column 'is_repeat_winner' = True if the winner_name has won
-    more than one bid in our dataset.
+def deduplicate_vendors_in_rows(rows: list[dict]) -> list[dict]:
+    """Normalize winner_name and vendor_name using fuzzy clustering."""
+    all_names = set()
+    for row in rows:
+        for field in ("winner_name", "vendor_name"):
+            n = row.get(field, "")
+            if n:
+                all_names.add(n)
 
-    WHY: The assignment asks us to detect patterns in repeat winners.
-    """
-    if "winner_name" not in df.columns:
-        return df
+    name_map = cluster_vendor_names(list(all_names))
 
-    win_counts = (
-        df.drop_duplicates(subset=["bid_id", "winner_name"])
-          .groupby("winner_name")["bid_id"]
-          .count()
-          .rename("win_count")
-    )
-    df = df.merge(win_counts, on="winner_name", how="left")
-    df["is_repeat_winner"] = df["win_count"] > 1
-    logger.info(
-        f"Repeat winner detection: "
-        f"{df['is_repeat_winner'].sum()} rows belong to repeat winners."
-    )
-    return df
+    for row in rows:
+        for field in ("winner_name", "vendor_name"):
+            original = row.get(field, "")
+            if original:
+                row[field] = name_map.get(original, original)
+
+    return rows
