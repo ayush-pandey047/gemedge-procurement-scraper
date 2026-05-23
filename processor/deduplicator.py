@@ -1,14 +1,13 @@
-
-import logging
-from fuzzywuzzy import fuzz
-
+ import logging
+from thefuzz import fuzz
+ 
 from processor.cleaner import canonical_vendor_name
-
+ 
 logger = logging.getLogger(__name__)
-
+ 
 FUZZY_THRESHOLD = 85  
-
-
+ 
+ 
 def deduplicate_bids(rows: list[dict]) -> list[dict]:
     """Remove duplicate bid_id rows, keeping the most complete record."""
     seen: dict[str, dict] = {}
@@ -19,16 +18,16 @@ def deduplicate_bids(rows: list[dict]) -> list[dict]:
         if bid_id not in seen:
             seen[bid_id] = row
         else:
-           
+            
             existing = seen[bid_id]
             if sum(bool(v) for v in row.values()) > sum(bool(v) for v in existing.values()):
                 seen[bid_id] = row
-
+ 
     deduped = list(seen.values())
     logger.info("Dedup bids: %d → %d", len(rows), len(deduped))
     return deduped
-
-
+ 
+ 
 def cluster_vendor_names(names: list[str]) -> dict[str, str]:
     """
     Build a mapping from variant names → canonical name.
@@ -36,7 +35,7 @@ def cluster_vendor_names(names: list[str]) -> dict[str, str]:
     """
     canonical_keys = [canonical_vendor_name(n) for n in names]
     clusters: dict[str, str] = {}  
-
+ 
     for i, key_i in enumerate(canonical_keys):
         if not key_i:
             continue
@@ -49,16 +48,16 @@ def cluster_vendor_names(names: list[str]) -> dict[str, str]:
                 break
         if not matched:
             clusters[key_i] = names[i]
-
+ 
 
     name_map: dict[str, str] = {}
     for i, name in enumerate(names):
         key = canonical_keys[i]
         name_map[name] = clusters.get(key, name)
-
+ 
     return name_map
-
-
+ 
+ 
 def deduplicate_vendors_in_rows(rows: list[dict]) -> list[dict]:
     """Normalize winner_name and vendor_name using fuzzy clustering."""
     all_names = set()
@@ -67,13 +66,13 @@ def deduplicate_vendors_in_rows(rows: list[dict]) -> list[dict]:
             n = row.get(field, "")
             if n:
                 all_names.add(n)
-
+ 
     name_map = cluster_vendor_names(list(all_names))
-
+ 
     for row in rows:
         for field in ("winner_name", "vendor_name"):
             original = row.get(field, "")
             if original:
                 row[field] = name_map.get(original, original)
-
+ 
     return rows
