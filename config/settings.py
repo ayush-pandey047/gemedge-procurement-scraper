@@ -10,7 +10,7 @@ FILTERS = {
 }
 
 
-NUM_AGENTS = 5                 
+NUM_AGENTS = 1                 
 NUM_DETAIL_WORKERS = 8          
 TARGET_BIDS = 30               
 MAX_BIDS = 200                  
