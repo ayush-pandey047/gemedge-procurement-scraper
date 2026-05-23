@@ -24,13 +24,11 @@ class BrowserManager:
 
         
         self.browser = await self._playwright.chromium.launch(
-            headless=HEADLESS,
-            args=[
-                "--disable-blink-features=AutomationControlled",  
-                "--no-sandbox",                                    
-                "--disable-dev-shm-usage",                       
-            ]
-        )
+                headless=HEADLESS,
+                args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                    ])
 
        
         self.context = await self.browser.new_context(
@@ -41,6 +39,9 @@ class BrowserManager:
             ),
             viewport={"width": 1440, "height": 900},
         )
+
+        await self.context.route("**/*.pdf", lambda route: route.abort())
+        await self.context.route("**/showbidDocument/**", lambda route: route.abort())
         self.context.set_default_timeout(PAGE_TIMEOUT)
         logger.info("Browser launched successfully.")
         return self
