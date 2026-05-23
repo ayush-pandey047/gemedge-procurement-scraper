@@ -1,31 +1,54 @@
-import os
-from pathlib import Path
+BASE_URL = "https://bidplus.gem.gov.in"
+ALL_BIDS_URL = f"{BASE_URL}/all-bids"
+BID_RESULT_URL = f"{BASE_URL}/bidding/bid/getBidResultView"
+EVALUATION_URL = f"{BASE_URL}/bidding/bid/getEvaluationDetails"
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 
-BASE_URL = "https://bidplus.gem.gov.in/all-bids"
+FILTERS = {
+    "status": "Bid/RA",        
+    "outcome": "Awarded",      
+}
 
-FILTER_STATUS   = "Bid/RA"
-FILTER_OUTCOME  = "Awarded"
 
-MIN_ENTRIES     = 30          
-PAGE_TIMEOUT    = 60_000      
-NAVIGATION_WAIT = 3_000      
-RETRY_LIMIT     = 3           
-HEADLESS        = True  
+NUM_AGENTS = 5                 
+NUM_DETAIL_WORKERS = 8          
+TARGET_BIDS = 30               
+MAX_BIDS = 200                  
+PAGE_TIMEOUT = 30_000           
+REQUEST_TIMEOUT = 20            
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 2                 
 
-RAW_DATA_DIR        = BASE_DIR / "data" / "raw"
-PROCESSED_DATA_DIR  = BASE_DIR / "data" / "processed"
-OUTPUT_CSV          = PROCESSED_DATA_DIR / "gem_bids.csv"
-OUTPUT_JSON         = PROCESSED_DATA_DIR / "gem_bids.json"
-INSIGHTS_FILE       = PROCESSED_DATA_DIR / "insights.txt"
 
-EXPECTED_COLUMNS = [
-    "bid_id", "category", "buyer", "quantity", "bid_value",
-    "award_date", "winner_name", "winner_price", "num_bidders",
-    "vendor_name", "winner_price", "vendor_rank", "vendor_price",
-    "status_flag"
+OUTPUT_DIR = "data/processed"
+RAW_DIR = "data/raw"
+CSV_FILENAME = "gem_procurement_data.csv"
+JSON_FILENAME = "gem_procurement_data.json"
+
+
+HEADLESS = True
+VIEWPORT = {"width": 1280, "height": 900}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+SCHEMA_FIELDS = [
+    "bid_id",
+    "category",
+    "buyer",
+    "quantity",
+    "bid_value",
+    "award_date",
+    "winner_name",
+    "winner_price",
+    "num_bidders",
+    "vendor_name",
+    "vendor_rank",
+    "vendor_price",
+    "status_flag",
+    "result_accessible",
+    "source_url",
 ]
-
-RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)   # This runs automatically when settings.py is imported.
