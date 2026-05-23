@@ -1,102 +1,96 @@
+
 import re
 import logging
-import pandas as pd
+from dateutil import parser as date_parser
 
 logger = logging.getLogger(__name__)
 
 
-def clean_price(value: str) -> float | None:
-    """
-    Convert a messy price string to a float.
-    Examples:
-        '₹1,23,456.78'  → 123456.78
-        '1,23,456'      → 123456.0
-        'N/A'           → None
-        ''              → None
-    """
-    if not value or str(value).strip() in ("", "N/A", "-", "NA", "ERROR"):
-        return None
-    cleaned = re.sub(r"[₹,\s]", "", str(value))
+def clean_price(raw: str) -> float:
+    """Extract numeric price from messy strings like '₹1,23,456.78' or '1.2 Lakh'."""
+    if not raw:
+        return 0.0
+    raw = str(raw).strip()
+
+    multiplier = 1
+    if re.search(r"lakh|lac", raw, re.I):
+        multiplier = 100_000
+    elif re.search(r"crore|cr\b", raw, re.I):
+        multiplier = 10_000_000
+
+    numeric = re.sub(r"[^\d.]", "", raw)
+    if not numeric:
+        return 0.0
     try:
-        return float(cleaned)
+        return round(float(numeric) * multiplier, 2)
     except ValueError:
-        return None
+        return 0.0
+
+
+def clean_quantity(raw: str) -> str:
+    """Normalize quantity strings."""
+    return raw.strip() if raw else ""
+
+
+def clean_date(raw: str) -> str:
+    """Parse date strings into ISO format YYYY-MM-DD."""
+    if not raw:
+        return ""
+    try:
+        dt = date_parser.parse(raw, dayfirst=True)
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return raw.strip()
+
+
+
+_SUFFIX_RE = re.compile(
+    r"\b(pvt\.?\s*ltd\.?|private\s+limited|limited|llp|llc|inc\.?|corp\.?|"
+    r"enterprises?|trading|solutions?|services?|technologies?)\b",
+    re.IGNORECASE,
+)
+_SPACE_RE = re.compile(r"\s{2,}")
 
 
 def normalize_vendor_name(name: str) -> str:
     """
-    Normalize vendor names so duplicates can be detected:
-      - Strip leading/trailing whitespace
-      - Collapse internal whitespace
-      - Title case (GEM sometimes returns ALL CAPS)
-      - Remove common suffixes that are sometimes included, sometimes not
-        (Pvt Ltd, Private Limited, etc.) — we keep them but standardize
+    Lowercase, strip legal suffixes (for matching), then title-case.
+    Keeps original if empty.
     """
-    if not name or str(name).strip() in ("", "N/A", "ERROR"):
+    if not name:
         return ""
-
-    name = str(name).strip()
-    name = re.sub(r"\s+", " ", name) 
-    name = name.title()              
-
-   
-    replacements = {
-        r"\bPvt\.?\s*Ltd\.?$": "Pvt Ltd",
-        r"\bPrivate Limited$": "Pvt Ltd",
-        r"\bLimited$": "Ltd",
-        r"\bLlp$": "LLP",
-    }
-    for pattern, replacement in replacements.items():
-        name = re.sub(pattern, replacement, name, flags=re.IGNORECASE)
-
-    return name.strip()
+    normalized = name.strip()
+    normalized = re.sub(r"[^\w\s&.]", " ", normalized)
+    normalized = _SPACE_RE.sub(" ", normalized).strip()
+    return normalized.title()
 
 
-def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply all cleaning operations to the full DataFrame.
-    Returns a cleaned DataFrame.
-    """
-    logger.info(f"Cleaning DataFrame with {len(df)} rows...")
+def canonical_vendor_name(name: str) -> str:
+    """Return a canonical key (lowercase, no suffixes) for dedup matching."""
+    name = normalize_vendor_name(name).lower()
+    name = _SUFFIX_RE.sub("", name)
+    name = _SPACE_RE.sub(" ", name).strip()
+    return name
 
-   
-    text_cols = ["bid_id", "category", "buyer", "remarks"]
-    for col in text_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-            df[col] = df[col].replace({"nan": "", "None": "", "ERROR": ""})
+
+def clean_row(row: dict) -> dict:
+    """Apply all cleaning functions to a flat row dict."""
+    row = dict(row)  
+
+    row["bid_value"] = clean_price(row.get("bid_value", ""))
+    row["winner_price"] = clean_price(row.get("winner_price", ""))
+    row["vendor_price"] = clean_price(row.get("vendor_price", ""))
+    row["award_date"] = clean_date(row.get("award_date", ""))
+    row["winner_name"] = normalize_vendor_name(row.get("winner_name", ""))
+    row["vendor_name"] = normalize_vendor_name(row.get("vendor_name", ""))
+    row["buyer"] = (row.get("buyer") or "").strip()
+    row["category"] = (row.get("category") or "").strip()
+    row["quantity"] = clean_quantity(row.get("quantity", ""))
 
    
-    for col in ["winner_name", "vendor_name"]:
-        if col in df.columns:
-            df[col] = df[col].apply(normalize_vendor_name)
+    try:
+        row["num_bidders"] = int(row.get("num_bidders") or 0)
+    except (ValueError, TypeError):
+        row["num_bidders"] = 0
 
-
-    for col in ["winner_price", "vendor_price", "bid_value"]:
-        if col in df.columns:
-            df[col] = df[col].apply(clean_price)
-
-    
-    for col in ["quantity", "num_bidders"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(r"[^\d.]", "", regex=True),
-                errors="coerce"
-            )
-
-   
-    if "award_date" in df.columns:
-        df["award_date"] = pd.to_datetime(
-            df["award_date"], dayfirst=True, errors="coerce"
-        ).dt.strftime("%Y-%m-%d")
-
-    
-    df["status_flag"] = "OK"
-    missing_mask = df[["winner_name", "winner_price"]].isnull().any(axis=1)
-    df.loc[missing_mask, "status_flag"] = "INCOMPLETE"
-
-    logger.info(
-        f"Cleaning done. "
-        f"{missing_mask.sum()} rows flagged INCOMPLETE out of {len(df)}."
-    )
-    return df
+    return row
