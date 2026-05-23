@@ -1,10 +1,12 @@
 import logging
 import json
 import re
+import asyncio
 import requests
 import pdfplumber
 from pathlib import Path
-from config.settings import RAW_DATA_DIR
+from playwright.async_api import Page
+from config.settings import RAW_DATA_DIR, PAGE_TIMEOUT, NAVIGATION_WAIT
 
 logger = logging.getLogger(__name__)
 
@@ -26,31 +28,15 @@ def download_pdf(url: str, save_path: Path) -> bool:
 
 
 def parse_ra_pdf(pdf_path: Path) -> dict:
-    """
-    Extract all available fields from GEM RA specification PDF.
-    Winner data requires portal login — flagged accordingly.
-    """
     result = {
-        "ra_number"     : "",
-        "ra_start_date" : "",
-        "ra_end_date"   : "",
-        "ministry"      : "",
-        "department"    : "",
-        "organisation"  : "",
-        "contract_period": "",
-        "mse_exemption" : "",
-        "winner_name"   : "REQUIRES_LOGIN",
-        "winner_price"  : "REQUIRES_LOGIN",
-        "num_bidders"   : "REQUIRES_LOGIN",
-        "vendors"       : []
+        "ra_number": "", "ra_start_date": "", "ra_end_date": "",
+        "ministry": "", "department": "", "organisation": "",
+        "contract_period": "", "mse_exemption": "",
     }
-
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            # Collect all table rows as key-value pairs
             for pg in pdf.pages:
-                tables = pg.extract_tables()
-                for table in tables:
+                for table in (pg.extract_tables() or []):
                     for row in table:
                         if not row or len(row) < 2:
                             continue
@@ -58,76 +44,88 @@ def parse_ra_pdf(pdf_path: Path) -> dict:
                         val = str(row[1] or "").strip() if row[1] else ""
                         if not key or not val:
                             continue
-
-                        if "ra number" in key:
-                            result["ra_number"] = val
-                        elif "ra start" in key:
-                            result["ra_start_date"] = val
-                        elif "ra end" in key:
-                            result["ra_end_date"] = val
-                        elif "ministry" in key or "state name" in key:
-                            result["ministry"] = val
-                        elif "department name" in key:
-                            result["department"] = val
-                        elif "organisation name" in key:
-                            result["organisation"] = val
-                        elif "contract period" in key:
-                            result["contract_period"] = val
-                        elif "mse exemption" in key:
-                            result["mse_exemption"] = val
-
+                        if "ra number" in key:        result["ra_number"] = val
+                        elif "ra start" in key:       result["ra_start_date"] = val
+                        elif "ra end" in key:         result["ra_end_date"] = val
+                        elif "ministry" in key:       result["ministry"] = val
+                        elif "department name" in key: result["department"] = val
+                        elif "organisation" in key:   result["organisation"] = val
+                        elif "contract period" in key: result["contract_period"] = val
+                        elif "mse exemption" in key:  result["mse_exemption"] = val
     except Exception as e:
         logger.error(f"PDF parse error {pdf_path}: {e}")
-
     return result
 
 
-async def scrape_all_details(page, listings: list[dict]) -> list[dict]:
+async def scrape_result_page(page: Page, result_url: str) -> dict:
+    """Try to get winner data from getBidResultView HTML page."""
+    empty = {"winner_name": "REQUIRES_LOGIN", "winner_price": "", "num_bidders": ""}
+    if not result_url:
+        return empty
+    try:
+        await page.goto(result_url, wait_until="networkidle", timeout=PAGE_TIMEOUT)
+        await asyncio.sleep(2)
+
+        # If redirected away from bidplus, it needs login
+        if "bidplus.gem.gov.in" not in page.url:
+            logger.warning(f"  Redirected to {page.url} — login required")
+            return empty
+
+        text = await page.evaluate("() => document.body.innerText")
+        data = {"winner_name": "", "winner_price": "", "num_bidders": ""}
+
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        for i, line in enumerate(lines):
+            ll = line.lower()
+            if "winner" in ll or "l1 vendor" in ll or "awarded to" in ll:
+                if i+1 < len(lines): data["winner_name"] = lines[i+1]
+            if "l1 price" in ll or "awarded price" in ll or "final price" in ll:
+                if i+1 < len(lines): data["winner_price"] = lines[i+1]
+            if "total bidder" in ll or "participating" in ll or "no. of bid" in ll:
+                if i+1 < len(lines): data["num_bidders"] = lines[i+1]
+
+        if not data["winner_name"]:
+            data["winner_name"] = "REQUIRES_LOGIN"
+        return data
+    except Exception as e:
+        logger.warning(f"  Result page error: {e}")
+        return empty
+
+
+async def scrape_all_details(page: Page, listings: list[dict]) -> list[dict]:
     pdf_dir = RAW_DATA_DIR / "pdfs"
     pdf_dir.mkdir(exist_ok=True)
 
     enriched = []
     for i, entry in enumerate(listings, 1):
-        bid_id  = entry.get("bid_id", f"bid_{i}")
-        ra_url  = entry.get("ra_pdf_url", "")
+        bid_id     = entry.get("bid_id", f"bid_{i}")
+        ra_url     = entry.get("ra_pdf_url", "")
+        result_url = entry.get("result_url", "")
         logger.info(f"Detail [{i}/{len(listings)}]: {bid_id}")
 
-        if not ra_url:
-            logger.warning(f"  No RA PDF URL for {bid_id}")
-            entry.update({
-                "ra_number": "", "ra_start_date": "", "ra_end_date": "",
-                "ministry": "", "department": "", "organisation": "",
-                "contract_period": "", "mse_exemption": "",
-                "winner_name": "REQUIRES_LOGIN",
-                "winner_price": "REQUIRES_LOGIN",
-                "num_bidders": "REQUIRES_LOGIN",
-                "vendors": []
-            })
-            enriched.append(entry)
-            continue
+        # 1. Try HTML result page first
+        result_data = await scrape_result_page(page, result_url)
+        entry.update(result_data)
 
-        safe_name = re.sub(r"[^\w]", "_", bid_id) + ".pdf"
-        pdf_path  = pdf_dir / safe_name
+        # 2. Parse RA PDF for extra metadata
+        if ra_url:
+            safe_name = re.sub(r"[^\w]", "_", bid_id) + ".pdf"
+            pdf_path  = pdf_dir / safe_name
+            if not pdf_path.exists():
+                download_pdf(ra_url, pdf_path)
+            if pdf_path.exists():
+                parsed = parse_ra_pdf(pdf_path)
+                # Only fill fields not already set from card text
+                for k, v in parsed.items():
+                    if not entry.get(k) and v:
+                        entry[k] = v
 
-        # Reuse cached PDF if already downloaded
-        if not pdf_path.exists():
-            ok = download_pdf(ra_url, pdf_path)
-            if not ok:
-                entry.update({
-                    "winner_name": "DOWNLOAD_FAILED",
-                    "winner_price": "", "num_bidders": "", "vendors": []
-                })
-                enriched.append(entry)
-                continue
-
-        parsed = parse_ra_pdf(pdf_path)
-        entry.update(parsed)
-        logger.info(f"  RA: {parsed['ra_number']} | Ministry: {parsed['ministry'][:40]}")
+        logger.info(f"  Winner: {entry.get('winner_name')} | Price: {entry.get('winner_price')}")
         enriched.append(entry)
+        await asyncio.sleep(NAVIGATION_WAIT / 1000)
 
     raw_path = RAW_DATA_DIR / "raw_with_details.json"
     with open(raw_path, "w", encoding="utf-8") as f:
         json.dump(enriched, f, indent=2, ensure_ascii=False)
     logger.info(f"Saved detail data to {raw_path}")
-
     return enriched
