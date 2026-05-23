@@ -1,176 +1,194 @@
+
 import asyncio
 import logging
-import json
 import re
-from playwright.async_api import Page
-from config.settings import RAW_DATA_DIR, PAGE_TIMEOUT, NAVIGATION_WAIT
+from dataclasses import dataclass
+from typing import Optional
+
+import aiohttp
+from bs4 import BeautifulSoup
+
+from config.settings import (
+    BID_RESULT_URL,
+    BASE_URL,
+    ALL_BIDS_URL,
+    NUM_DETAIL_WORKERS,
+    REQUEST_TIMEOUT,
+    RETRY_ATTEMPTS,
+    RETRY_DELAY,
+)
+from scraper.listing_scraper import BidListing
 
 logger = logging.getLogger(__name__)
 
 
-async def scrape_result_page(page: Page, result_url: str, numeric_id: str) -> dict:
+@dataclass
+class BidDetail:
+    result_id: str = ""
+    winner_name: str = ""
+    winner_price: str = ""
+    num_bidders: int = 0
+    result_accessible: str = "yes"   
+    raw_html: str = ""
+
+
+def _parse_result_page(html: str, result_id: str) -> BidDetail:
     """
-    Fetch getBidResultView with the anonymous ci_session cookie
-    that Playwright already has from visiting /all-bids.
-    Works for ~83% of bids without any login.
+    Parse getBidResultView HTML.
+    The page contains a table with vendor rank, name, quoted price.
+    L1 = rank 1 (winner), L2 = rank 2, etc.
     """
-    empty = {
-        "winner_name"   : "LOGIN_REQUIRED",
-        "winner_price"  : "",
-        "num_bidders"   : "",
-        "vendors"       : [],
-        "result_accessible": "login_required"
-    }
+    detail = BidDetail(result_id=result_id)
+    soup = BeautifulSoup(html, "lxml")
 
-    if not result_url:
-        return empty
+   
+    page_text = soup.get_text().lower()
+    if any(kw in page_text for kw in ["please login", "sign in", "sso login", "unauthorized"]):
+        detail.result_accessible = "login_required"
+        return detail
 
-    try:
-        await page.goto(result_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
-        await asyncio.sleep(2)
+    tables = soup.select("table")
+    result_table = None
+    for tbl in tables:
+        headers_text = " ".join(th.get_text(strip=True).lower() for th in tbl.select("th"))
+        if any(kw in headers_text for kw in ["rank", "vendor", "price", "bidder", "l1", "l2"]):
+            result_table = tbl
+            break
 
-        # If redirected away — this bid is SSO-gated
-        if "bidplus.gem.gov.in" not in page.url:
-            logger.warning(f"  [{numeric_id}] SSO-gated — login required")
-            return empty
+    if not result_table:
+        rank_items = soup.select("[class*='rank'], [class*='vendor'], [class*='bidder']")
+        if not rank_items:
+            detail.result_accessible = "error"
+            return detail
 
-        # Extract all text
-        page_text = await page.evaluate("() => document.body.innerText || ''")
+    if result_table:
+        rows = result_table.select("tbody tr, tr")
+        headers = [th.get_text(strip=True).lower() for th in result_table.select("th")]
 
-        # Check if result data is actually present
-        has_data = any(k in page_text.lower() for k in [
-            'l1', 'winner', 'vendor', 'rank', 'price', 'bidder', 'awarded'
-        ])
-        if not has_data:
-            logger.warning(f"  [{numeric_id}] No result data visible")
-            return empty
+        rank_col = next((i for i, h in enumerate(headers) if "rank" in h or "sl" in h), 0)
+        vendor_col = next((i for i, h in enumerate(headers) if "vendor" in h or "firm" in h or "name" in h), 1)
+        price_col = next((i for i, h in enumerate(headers) if "price" in h or "amount" in h or "quoted" in h), 2)
 
-        # Extract vendor table
-        vendors = await page.evaluate("""
-            () => {
-                var vendors = [];
-                var tables = document.querySelectorAll('table');
-                tables.forEach(function(tbl) {
-                    var headers = Array.from(tbl.querySelectorAll('th')).map(function(h){
-                        return h.innerText.trim().toLowerCase();
-                    });
-                    var hasVendor = headers.some(function(h){
-                        return h.includes('vendor') || h.includes('bidder') || h.includes('rank') || h.includes('name');
-                    });
-                    if (!hasVendor) return;
+        bidder_rows = []
+        for row in rows:
+            cells = row.find_all("td")
+            if not cells or len(cells) < 2:
+                continue
+            try:
+                rank_text = cells[rank_col].get_text(strip=True) if rank_col < len(cells) else ""
+                vendor_text = cells[vendor_col].get_text(strip=True) if vendor_col < len(cells) else ""
+                price_text = cells[price_col].get_text(strip=True) if price_col < len(cells) else ""
+                if vendor_text:
+                    bidder_rows.append({
+                        "rank": rank_text,
+                        "vendor": vendor_text,
+                        "price": price_text,
+                    })
+            except Exception:
+                continue
 
-                    var rows = tbl.querySelectorAll('tbody tr');
-                    rows.forEach(function(row) {
-                        var cells = Array.from(row.querySelectorAll('td')).map(function(c){
-                            return c.innerText.trim();
-                        });
-                        if (cells.length < 2) return;
-                        var vendor = {
-                            vendor_name : '', vendor_rank: '',
-                            vendor_price: '', disqualified: false, remarks: ''
-                        };
-                        headers.forEach(function(h, i) {
-                            var val = cells[i] || '';
-                            if (h.includes('name') || h.includes('vendor') || h.includes('bidder')) vendor.vendor_name = val;
-                            else if (h.includes('rank') || h === 'l1' || h === 'l2') vendor.vendor_rank = val;
-                            else if (h.includes('price') || h.includes('amount') || h.includes('quoted')) vendor.vendor_price = val.replace(/,/g,'');
-                            else if (h.includes('remark') || h.includes('status')) {
-                                vendor.remarks = val;
-                                if (val.toLowerCase().includes('disq') || val.toLowerCase() === 'dq') vendor.disqualified = true;
-                            }
-                        });
-                        if (vendor.vendor_name || vendor.vendor_rank) vendors.push(vendor);
-                    });
-                });
-                return vendors;
-            }
-        """)
+        detail.num_bidders = len(bidder_rows)
+        if bidder_rows:
+            detail.winner_name = bidder_rows[0]["vendor"]
+            detail.winner_price = bidder_rows[0]["price"]
 
-        # Extract winner + L1 price from text patterns
-        winner_name  = ""
-        winner_price = ""
-        num_bidders  = str(len(vendors)) if vendors else ""
+    
+    if not detail.winner_name:
+        winner_match = re.search(
+            r"(?:winner|l1|lowest)[:\s]+([A-Za-z0-9\s&.,\-']{5,80})",
+            page_text,
+            re.IGNORECASE,
+        )
+        if winner_match:
+            detail.winner_name = winner_match.group(1).strip()
 
-        # L1 vendor is first ranked vendor
-        for v in vendors:
-            rank = str(v.get("vendor_rank", "")).upper()
-            if rank in ("L1", "1", "RANK 1", "WINNER"):
-                winner_name  = v.get("vendor_name", "")
-                winner_price = v.get("vendor_price", "")
-                break
+    if not detail.winner_price:
+        price_match = re.search(
+            r"(?:l1\s*price|winning\s*price|final\s*price)[:\s₹]*([\d,\.]+)",
+            page_text,
+            re.IGNORECASE,
+        )
+        if price_match:
+            detail.winner_price = price_match.group(1).strip()
 
-        # Fallback: regex on page text
-        if not winner_name:
-            patterns = [
-                r"L1\s+Vendor[:\s]+([A-Za-z0-9\s&.,()-]+)",
-                r"Winner[:\s]+([A-Za-z0-9\s&.,()-]+)",
-                r"Awarded\s+to[:\s]+([A-Za-z0-9\s&.,()-]+)",
-            ]
-            for pat in patterns:
-                m = re.search(pat, page_text, re.IGNORECASE)
-                if m:
-                    winner_name = m.group(1).strip()[:100]
-                    break
-
-        if not winner_price:
-            price_patterns = [
-                r"L1\s+Price[:\s]+([\d,]+\.?\d*)",
-                r"Awarded\s+Price[:\s]+([\d,]+\.?\d*)",
-                r"Final\s+Price[:\s]+([\d,]+\.?\d*)",
-            ]
-            for pat in price_patterns:
-                m = re.search(pat, page_text, re.IGNORECASE)
-                if m:
-                    winner_price = m.group(1).replace(",", "")
-                    break
-
-        if not num_bidders:
-            m = re.search(r"(?:total|no\.?\s*of)\s*bidder[s]?[:\s]+(\d+)", page_text, re.IGNORECASE)
-            if m:
-                num_bidders = m.group(1)
-
-        logger.info(f"  [{numeric_id}] Winner: {winner_name[:40] if winner_name else 'N/A'} | "
-                    f"Price: {winner_price} | Vendors: {len(vendors)}")
-
-        return {
-            "winner_name"      : winner_name or "NOT_FOUND",
-            "winner_price"     : winner_price,
-            "num_bidders"      : num_bidders,
-            "vendors"          : vendors,
-            "result_accessible": "public"
-        }
-
-    except Exception as e:
-        logger.warning(f"  Result page error [{numeric_id}]: {e}")
-        return empty
+    return detail
 
 
-async def scrape_all_details(page: Page, listings: list[dict]) -> list[dict]:
-    enriched = []
-    public_count = 0
-    gated_count  = 0
+async def _fetch_result(
+    session: aiohttp.ClientSession,
+    result_id: str,
+    cookies: dict,
+    semaphore: asyncio.Semaphore,
+) -> BidDetail:
+    """Fetch and parse a single bid result page."""
+    url = f"{BID_RESULT_URL}/{result_id}"
+    async with semaphore:
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                async with session.get(
+                    url,
+                    headers={
+                        "Referer": ALL_BIDS_URL,
+                        "Accept": "text/html,application/xhtml+xml,*/*",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                ) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        return _parse_result_page(html, result_id)
+                    elif resp.status in (401, 403):
+                        detail = BidDetail(result_id=result_id)
+                        detail.result_accessible = "login_required"
+                        return detail
+                    else:
+                        logger.warning("HTTP %d for result_id %s", resp.status, result_id)
+            except asyncio.TimeoutError:
+                logger.debug("Timeout on result_id %s (attempt %d)", result_id, attempt)
+            except Exception as exc:
+                logger.debug("Error on result_id %s: %s", result_id, exc)
 
-    for i, entry in enumerate(listings, 1):
-        bid_id     = entry.get("bid_id", f"bid_{i}")
-        result_url = entry.get("result_url", "")
-        numeric_id = entry.get("numeric_id", "")
-        logger.info(f"Detail [{i}/{len(listings)}]: {bid_id}")
+            if attempt < RETRY_ATTEMPTS:
+                await asyncio.sleep(RETRY_DELAY * attempt)
 
-        result_data = await scrape_result_page(page, result_url, numeric_id)
-        entry.update(result_data)
+        detail = BidDetail(result_id=result_id)
+        detail.result_accessible = "error"
+        return detail
 
-        if result_data["result_accessible"] == "public":
-            public_count += 1
+
+async def fetch_all_details(
+    listings: list[BidListing],
+    cookies: dict,
+) -> dict[str, BidDetail]:
+    """
+    Fetch detail pages for all listings concurrently.
+    Returns a dict keyed by result_id.
+    """
+    semaphore = asyncio.Semaphore(NUM_DETAIL_WORKERS)
+    details: dict[str, BidDetail] = {}
+
+    to_fetch = [l for l in listings if l.result_id]
+    logger.info("Fetching details for %d listings (%d workers)...", len(to_fetch), NUM_DETAIL_WORKERS)
+
+    async with aiohttp.ClientSession(cookies=cookies) as session:
+        tasks = [
+            _fetch_result(session, l.result_id, cookies, semaphore)
+            for l in to_fetch
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for listing, result in zip(to_fetch, results):
+        if isinstance(result, Exception):
+            logger.error("Detail fetch exception for %s: %s", listing.result_id, result)
+            bad = BidDetail(result_id=listing.result_id, result_accessible="error")
+            details[listing.result_id] = bad
         else:
-            gated_count += 1
+            details[listing.result_id] = result
 
-        enriched.append(entry)
-        await asyncio.sleep(NAVIGATION_WAIT / 1000)
-
-    logger.info(f"Results: {public_count} public | {gated_count} login-required")
-
-    raw_path = RAW_DATA_DIR / "raw_with_details.json"
-    with open(raw_path, "w", encoding="utf-8") as f:
-        json.dump(enriched, f, indent=2, ensure_ascii=False)
-    logger.info(f"Saved {len(enriched)} enriched entries")
-    return enriched
+    accessible = sum(1 for d in details.values() if d.result_accessible == "yes")
+    login_req = sum(1 for d in details.values() if d.result_accessible == "login_required")
+    errors = sum(1 for d in details.values() if d.result_accessible == "error")
+    logger.info(
+        "Detail results — accessible: %d | login_required: %d | errors: %d",
+        accessible, login_req, errors,
+    )
+    return details
