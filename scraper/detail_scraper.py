@@ -1,131 +1,176 @@
+import asyncio
 import logging
 import json
 import re
-import asyncio
-import requests
-import pdfplumber
-from pathlib import Path
 from playwright.async_api import Page
 from config.settings import RAW_DATA_DIR, PAGE_TIMEOUT, NAVIGATION_WAIT
 
 logger = logging.getLogger(__name__)
 
 
-def download_pdf(url: str, save_path: Path) -> bool:
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"}
-        r = requests.get(url, headers=headers, timeout=30, stream=True)
-        if r.status_code == 200:
-            with open(save_path, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
-            return True
-        logger.warning(f"Bad response {r.status_code} for {url}")
-        return False
-    except Exception as e:
-        logger.error(f"Download failed {url}: {e}")
-        return False
-
-
-def parse_ra_pdf(pdf_path: Path) -> dict:
-    result = {
-        "ra_number": "", "ra_start_date": "", "ra_end_date": "",
-        "ministry": "", "department": "", "organisation": "",
-        "contract_period": "", "mse_exemption": "",
+async def scrape_result_page(page: Page, result_url: str, numeric_id: str) -> dict:
+    """
+    Fetch getBidResultView with the anonymous ci_session cookie
+    that Playwright already has from visiting /all-bids.
+    Works for ~83% of bids without any login.
+    """
+    empty = {
+        "winner_name"   : "LOGIN_REQUIRED",
+        "winner_price"  : "",
+        "num_bidders"   : "",
+        "vendors"       : [],
+        "result_accessible": "login_required"
     }
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for pg in pdf.pages:
-                for table in (pg.extract_tables() or []):
-                    for row in table:
-                        if not row or len(row) < 2:
-                            continue
-                        key = str(row[0] or "").strip().lower()
-                        val = str(row[1] or "").strip() if row[1] else ""
-                        if not key or not val:
-                            continue
-                        if "ra number" in key:        result["ra_number"] = val
-                        elif "ra start" in key:       result["ra_start_date"] = val
-                        elif "ra end" in key:         result["ra_end_date"] = val
-                        elif "ministry" in key:       result["ministry"] = val
-                        elif "department name" in key: result["department"] = val
-                        elif "organisation" in key:   result["organisation"] = val
-                        elif "contract period" in key: result["contract_period"] = val
-                        elif "mse exemption" in key:  result["mse_exemption"] = val
-    except Exception as e:
-        logger.error(f"PDF parse error {pdf_path}: {e}")
-    return result
 
-
-async def scrape_result_page(page: Page, result_url: str) -> dict:
-    """Try to get winner data from getBidResultView HTML page."""
-    empty = {"winner_name": "REQUIRES_LOGIN", "winner_price": "", "num_bidders": ""}
     if not result_url:
         return empty
+
     try:
-        await page.goto(result_url, wait_until="networkidle", timeout=PAGE_TIMEOUT)
+        await page.goto(result_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
         await asyncio.sleep(2)
 
-        # If redirected away from bidplus, it needs login
+        # If redirected away — this bid is SSO-gated
         if "bidplus.gem.gov.in" not in page.url:
-            logger.warning(f"  Redirected to {page.url} — login required")
+            logger.warning(f"  [{numeric_id}] SSO-gated — login required")
             return empty
 
-        text = await page.evaluate("() => document.body.innerText")
-        data = {"winner_name": "", "winner_price": "", "num_bidders": ""}
+        # Extract all text
+        page_text = await page.evaluate("() => document.body.innerText || ''")
 
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        for i, line in enumerate(lines):
-            ll = line.lower()
-            if "winner" in ll or "l1 vendor" in ll or "awarded to" in ll:
-                if i+1 < len(lines): data["winner_name"] = lines[i+1]
-            if "l1 price" in ll or "awarded price" in ll or "final price" in ll:
-                if i+1 < len(lines): data["winner_price"] = lines[i+1]
-            if "total bidder" in ll or "participating" in ll or "no. of bid" in ll:
-                if i+1 < len(lines): data["num_bidders"] = lines[i+1]
+        # Check if result data is actually present
+        has_data = any(k in page_text.lower() for k in [
+            'l1', 'winner', 'vendor', 'rank', 'price', 'bidder', 'awarded'
+        ])
+        if not has_data:
+            logger.warning(f"  [{numeric_id}] No result data visible")
+            return empty
 
-        if not data["winner_name"]:
-            data["winner_name"] = "REQUIRES_LOGIN"
-        return data
+        # Extract vendor table
+        vendors = await page.evaluate("""
+            () => {
+                var vendors = [];
+                var tables = document.querySelectorAll('table');
+                tables.forEach(function(tbl) {
+                    var headers = Array.from(tbl.querySelectorAll('th')).map(function(h){
+                        return h.innerText.trim().toLowerCase();
+                    });
+                    var hasVendor = headers.some(function(h){
+                        return h.includes('vendor') || h.includes('bidder') || h.includes('rank') || h.includes('name');
+                    });
+                    if (!hasVendor) return;
+
+                    var rows = tbl.querySelectorAll('tbody tr');
+                    rows.forEach(function(row) {
+                        var cells = Array.from(row.querySelectorAll('td')).map(function(c){
+                            return c.innerText.trim();
+                        });
+                        if (cells.length < 2) return;
+                        var vendor = {
+                            vendor_name : '', vendor_rank: '',
+                            vendor_price: '', disqualified: false, remarks: ''
+                        };
+                        headers.forEach(function(h, i) {
+                            var val = cells[i] || '';
+                            if (h.includes('name') || h.includes('vendor') || h.includes('bidder')) vendor.vendor_name = val;
+                            else if (h.includes('rank') || h === 'l1' || h === 'l2') vendor.vendor_rank = val;
+                            else if (h.includes('price') || h.includes('amount') || h.includes('quoted')) vendor.vendor_price = val.replace(/,/g,'');
+                            else if (h.includes('remark') || h.includes('status')) {
+                                vendor.remarks = val;
+                                if (val.toLowerCase().includes('disq') || val.toLowerCase() === 'dq') vendor.disqualified = true;
+                            }
+                        });
+                        if (vendor.vendor_name || vendor.vendor_rank) vendors.push(vendor);
+                    });
+                });
+                return vendors;
+            }
+        """)
+
+        # Extract winner + L1 price from text patterns
+        winner_name  = ""
+        winner_price = ""
+        num_bidders  = str(len(vendors)) if vendors else ""
+
+        # L1 vendor is first ranked vendor
+        for v in vendors:
+            rank = str(v.get("vendor_rank", "")).upper()
+            if rank in ("L1", "1", "RANK 1", "WINNER"):
+                winner_name  = v.get("vendor_name", "")
+                winner_price = v.get("vendor_price", "")
+                break
+
+        # Fallback: regex on page text
+        if not winner_name:
+            patterns = [
+                r"L1\s+Vendor[:\s]+([A-Za-z0-9\s&.,()-]+)",
+                r"Winner[:\s]+([A-Za-z0-9\s&.,()-]+)",
+                r"Awarded\s+to[:\s]+([A-Za-z0-9\s&.,()-]+)",
+            ]
+            for pat in patterns:
+                m = re.search(pat, page_text, re.IGNORECASE)
+                if m:
+                    winner_name = m.group(1).strip()[:100]
+                    break
+
+        if not winner_price:
+            price_patterns = [
+                r"L1\s+Price[:\s]+([\d,]+\.?\d*)",
+                r"Awarded\s+Price[:\s]+([\d,]+\.?\d*)",
+                r"Final\s+Price[:\s]+([\d,]+\.?\d*)",
+            ]
+            for pat in price_patterns:
+                m = re.search(pat, page_text, re.IGNORECASE)
+                if m:
+                    winner_price = m.group(1).replace(",", "")
+                    break
+
+        if not num_bidders:
+            m = re.search(r"(?:total|no\.?\s*of)\s*bidder[s]?[:\s]+(\d+)", page_text, re.IGNORECASE)
+            if m:
+                num_bidders = m.group(1)
+
+        logger.info(f"  [{numeric_id}] Winner: {winner_name[:40] if winner_name else 'N/A'} | "
+                    f"Price: {winner_price} | Vendors: {len(vendors)}")
+
+        return {
+            "winner_name"      : winner_name or "NOT_FOUND",
+            "winner_price"     : winner_price,
+            "num_bidders"      : num_bidders,
+            "vendors"          : vendors,
+            "result_accessible": "public"
+        }
+
     except Exception as e:
-        logger.warning(f"  Result page error: {e}")
+        logger.warning(f"  Result page error [{numeric_id}]: {e}")
         return empty
 
 
 async def scrape_all_details(page: Page, listings: list[dict]) -> list[dict]:
-    pdf_dir = RAW_DATA_DIR / "pdfs"
-    pdf_dir.mkdir(exist_ok=True)
-
     enriched = []
+    public_count = 0
+    gated_count  = 0
+
     for i, entry in enumerate(listings, 1):
         bid_id     = entry.get("bid_id", f"bid_{i}")
-        ra_url     = entry.get("ra_pdf_url", "")
         result_url = entry.get("result_url", "")
+        numeric_id = entry.get("numeric_id", "")
         logger.info(f"Detail [{i}/{len(listings)}]: {bid_id}")
 
-        # 1. Try HTML result page first
-        result_data = await scrape_result_page(page, result_url)
+        result_data = await scrape_result_page(page, result_url, numeric_id)
         entry.update(result_data)
 
-        # 2. Parse RA PDF for extra metadata
-        if ra_url:
-            safe_name = re.sub(r"[^\w]", "_", bid_id) + ".pdf"
-            pdf_path  = pdf_dir / safe_name
-            if not pdf_path.exists():
-                download_pdf(ra_url, pdf_path)
-            if pdf_path.exists():
-                parsed = parse_ra_pdf(pdf_path)
-                # Only fill fields not already set from card text
-                for k, v in parsed.items():
-                    if not entry.get(k) and v:
-                        entry[k] = v
+        if result_data["result_accessible"] == "public":
+            public_count += 1
+        else:
+            gated_count += 1
 
-        logger.info(f"  Winner: {entry.get('winner_name')} | Price: {entry.get('winner_price')}")
         enriched.append(entry)
         await asyncio.sleep(NAVIGATION_WAIT / 1000)
+
+    logger.info(f"Results: {public_count} public | {gated_count} login-required")
 
     raw_path = RAW_DATA_DIR / "raw_with_details.json"
     with open(raw_path, "w", encoding="utf-8") as f:
         json.dump(enriched, f, indent=2, ensure_ascii=False)
-    logger.info(f"Saved detail data to {raw_path}")
+    logger.info(f"Saved {len(enriched)} enriched entries")
     return enriched

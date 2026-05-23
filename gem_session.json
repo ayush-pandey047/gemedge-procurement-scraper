@@ -1,0 +1,102 @@
+[
+  {
+    "name": "rf_iden",
+    "value": "002345533ec6ab5c4501382efc1710f8",
+    "domain": ".gem.gov.in",
+    "path": "/ARXSSO",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "JSESSIONID",
+    "value": "mT4IYnuS3T7NJTsqQqqS9lTVzw3Kknnm8q_-wSGH.master:server-one",
+    "domain": "sso.gem.gov.in",
+    "path": "/ARXSSO",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "arx_session_id",
+    "value": "edecbd92b60af9d3c73e446ff230fa37",
+    "domain": ".gem.gov.in",
+    "path": "/ARXSSO",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "TS01db428b",
+    "value": "01e393167d6a2d39b4d6873b5a186773dca2a47335354829cee997b181b6acbe7e41175a308df3e0804b4a13fd393781f60d70e3bd7e3afd41e700431ec62fa7cceac6e0b413bf5c9c1eb2e992ce63a1752c81e4cb12a02f9e80be3253d186a5a0ccb727df5d7648f7d608b2cef4e891c0eada7ddc",
+    "domain": "sso.gem.gov.in",
+    "path": "/ARXSSO",
+    "expires": -1,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "GeM",
+    "value": "1542078820.20480.0000",
+    "domain": "sso.gem.gov.in",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "TS01e2c4f3",
+    "value": "01e393167d4e154fe489dfa22330513115affbc5bd354829cee997b181b6acbe7e41175a308df3e0804b4a13fd393781f60d70e3bd0d49bf0716937ddcf36bc47b025718ff",
+    "domain": ".sso.gem.gov.in",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "themeOption",
+    "value": "0",
+    "domain": ".gem.gov.in",
+    "path": "/",
+    "expires": 1782262339,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_gid",
+    "value": "GA1.3.326761451.1779564140",
+    "domain": ".gem.gov.in",
+    "path": "/",
+    "expires": 1779650539,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_ga_MMQ7TYBESB",
+    "value": "GS2.1.s1779564140$o1$g0$t1779564140$j60$l0$h0",
+    "domain": ".gem.gov.in",
+    "path": "/",
+    "expires": 1814124140.126721,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_ga",
+    "value": "GA1.1.1212156375.1779564140",
+    "domain": ".gem.gov.in",
+    "path": "/",
+    "expires": 1814124140.126958,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  }
+]
