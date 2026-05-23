@@ -5,16 +5,10 @@ __pycache__/
 *.pyd
 .Python
 
-
 data/
-
-
-.env
-
 
 .vscode/
 .idea/
-
 
 .DS_Store
 Thumbs.db
