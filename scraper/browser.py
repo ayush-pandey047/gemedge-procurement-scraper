@@ -1,7 +1,6 @@
-
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from playwright.async_api import (
     async_playwright,
@@ -34,8 +33,8 @@ class BrowserManager:
         self.num_contexts = num_contexts
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
-        self._contexts: list[BrowserContext] = []
-        self._cookie_jar: list[dict] = []   
+        self._contexts: List[BrowserContext] = []
+        self._cookie_jar: List[dict] = []   # shared anonymous cookies
 
     async def start(self) -> None:
         """Launch browser and harvest the anonymous session cookie."""
@@ -43,7 +42,7 @@ class BrowserManager:
         self._browser = await self._playwright.chromium.launch(headless=HEADLESS)
         logger.info("Browser launched (headless=%s)", HEADLESS)
 
-       
+        # ── Harvest anonymous cookie from /all-bids ───────────────────────
         seed_ctx = await self._browser.new_context(
             viewport=VIEWPORT,
             user_agent=USER_AGENT,
@@ -63,7 +62,7 @@ class BrowserManager:
             await seed_page.close()
             await seed_ctx.close()
 
-        
+        # ── Spin up agent contexts ─────────────────────────────────────────
         for i in range(self.num_contexts):
             ctx = await self._browser.new_context(
                 viewport=VIEWPORT,

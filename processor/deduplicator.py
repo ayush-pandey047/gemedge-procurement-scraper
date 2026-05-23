@@ -1,4 +1,4 @@
- import logging
+import logging
 from thefuzz import fuzz
  
 from processor.cleaner import canonical_vendor_name

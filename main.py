@@ -126,7 +126,7 @@ async def main():
 
     
     console.print("[bold yellow]Phase 2/4:[/bold yellow] Fetching bid result details...")
-    cookies = await browser.get_cookies_dict() if False else {}
+
     
     temp_browser = BrowserManager(num_contexts=1)
     await temp_browser.start()
