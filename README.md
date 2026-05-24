@@ -41,7 +41,6 @@ python main.py
 ### 4. Output
 - `data/processed/gem_bids.csv`
 - `data/processed/gem_bids.json`
-- `data/processed/insights.txt`
 
 ## Output Schema
 | Column | Description |
