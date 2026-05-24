@@ -1,0 +1,35 @@
+{
+  "pct_bids_more_than_3_participants": {
+    "value": 0.0,
+    "numerator": 0,
+    "denominator": 0,
+    "label": "0.0% of bids had more than 3 participants"
+  },
+  "l1_l2_price_gap": {
+    "avg_gap_pct": 0,
+    "median_gap_pct": 0,
+    "max_gap_pct": 0,
+    "bids_with_gap_over_20pct": 0,
+    "total_bids_analyzed": 0,
+    "label": "Average L1-L2 gap: 0% | Median: 0% | 0 bids with gap >20%"
+  },
+  "repeat_winners": {
+    "num_unique_winners": 0,
+    "num_repeat_winners": 0,
+    "top_5_winners": [],
+    "concentration": 0.0,
+    "label": "No repeat winner data"
+  },
+  "summary": {
+    "total_rows": 10,
+    "total_unique_bids": 0,
+    "data_accessibility": {
+      "accessible": 0,
+      "login_required": 0,
+      "error": 0
+    },
+    "anomaly_counts": {
+      "zero_price": 10
+    }
+  }
+}

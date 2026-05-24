@@ -1,0 +1,57 @@
+{
+  "pct_bids_more_than_3_participants": {
+    "value": 0.0,
+    "numerator": 0,
+    "denominator": 27,
+    "label": "0.0% of bids had more than 3 participants"
+  },
+  "l1_l2_price_gap": {
+    "avg_gap_pct": 0,
+    "median_gap_pct": 0,
+    "max_gap_pct": 0,
+    "bids_with_gap_over_20pct": 0,
+    "total_bids_analyzed": 0,
+    "label": "Average L1-L2 gap: 0% | Median: 0% | 0 bids with gap >20%"
+  },
+  "repeat_winners": {
+    "num_unique_winners": 19,
+    "num_repeat_winners": 5,
+    "top_5_winners": [
+      {
+        "vendor": "M S Farooq Enterprises Mse Mse Social Category General Under Pma",
+        "wins": 3
+      },
+      {
+        "vendor": "Dev Group Mse Social Category General Under Pma",
+        "wins": 3
+      },
+      {
+        "vendor": "M S Good Day Traders Mse Mii Under Pma",
+        "wins": 3
+      },
+      {
+        "vendor": "Noor Enterprisesunder Pma",
+        "wins": 2
+      },
+      {
+        "vendor": "M S Shree Enterprisesunder Pma",
+        "wins": 2
+      }
+    ],
+    "concentration": 48.1,
+    "label": "5 vendors won multiple bids. Top winner: M S Farooq Enterprises Mse Mse Social Category General Under Pma (3 wins)"
+  },
+  "summary": {
+    "total_rows": 30,
+    "total_unique_bids": 27,
+    "data_accessibility": {
+      "accessible": 27,
+      "login_required": 0,
+      "error": 3
+    },
+    "anomaly_counts": {
+      "repeat_winner": 13,
+      "zero_price": 3
+    }
+  }
+}
